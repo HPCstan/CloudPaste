@@ -25,8 +25,227 @@
   <a href="#-deployment-guide">🚀 Deployment Guide</a> •
   <a href="#-tech-stack">🔧 Tech Stack</a> •
   <a href="#-development">💻 Development</a> •
-  <a href="#-license">📄 License</a>
+  <a href="#-license">📄 License</a> •
+  <a href="#-自架部署實戰筆記oracle-vps--docker--自建-telegram-bot-api">🚀 自架部署實戰筆記</a>
 </p>
+
+---
+
+## 🚀 自架部署實戰筆記(Oracle VPS + Docker + 自建 Telegram Bot API)
+
+> 本節由 **HPCstan** 整理:記錄「把 CloudPaste 從 Cloudflare Worker 搬到自架 VPS,並修好大檔案上傳 / 下載 / 預覽 / 分享」的**完整流程、根因與修法**。照著做可複製出同樣可用的環境(支援 >100MB 檔案)。適用:自架 Telegram 圖床 / 大檔分享,且**不想受 Cloudflare 限制**的人。
+
+### 一、最終架構
+
+```
+瀏覽器
+  └─ https://<你的網域>            ← DNS-only(灰雲)A 記錄直指 VPS,「不」經 Cloudflare
+      └─ VPS openresty :443         ← Let's Encrypt TLS 反向代理
+           ├─ /api/  → 127.0.0.1:8787   CloudPaste backend(Docker, Node + SQLite)
+           └─ /        → 127.0.0.1:8788  CloudPaste frontend(Docker, nginx)
+                 backend ─► http://host.docker.internal:8087 (tg-files nginx)
+                              ├─ /bot/…  → telegram-bot-api :8086(API 方法)
+                              └─ /file/… → 讀 /var/lib/telegram-bot-api volume(檔案下載)
+                                     telegram-bot-api(--local) ─► Telegram
+```
+
+**三個必讀核心觀念**
+1. **不要走 Cloudflare**:Free/Pro 方案單一請求 body 上限 **100MB**,Worker 記憶體只有 **128MB**;CloudPaste 分享頁是「**單次整檔**」串流 → 超過必爆。所以網域要用 **DNS-only(灰雲)** 直連 VPS。
+2. **tdlib `--local` 的 Bot API server「本身不服務檔案下載」**(官方 issue #345 / #540):`getFile` 只回磁碟絕對路徑,`/file/...` 一律 404。**必須另外跑一台 nginx** 從 volume 服務檔案。← 最容易踩的雷
+3. **後端是 `@hono/node-server`,Node 預設 `requestTimeout=300s`**:單次請求超過 300 秒會被 abort。上傳速度慢時大檔「單次上傳」必失敗 → 要用**分片**。
+
+### 二、元件與連接埠
+
+| 元件 | 映像 | 對外埠 | 說明 |
+|---|---|---|---|
+| cloudpaste-backend | `dragon730/cloudpaste-backend:latest` | 127.0.0.1:8787 | 後端 API + SQLite(`DATA_DIR=/data`) |
+| cloudpaste-frontend | `dragon730/cloudpaste-frontend:latest` | 127.0.0.1:8788 | 前端(nginx),`BACKEND_URL=https://<你的網域>` |
+| telegram-bot-api | `aiogram/telegram-bot-api:latest` | 0.0.0.0:8086 | 自建 Bot API server(`--local`) |
+| **tg-files** | `nginx:1.27-alpine` | 0.0.0.0:8087 | **檔案下載服務(必需)** + `/bot/` 轉發 |
+| openresty(1Panel 既有) | — | :80/:443 | 對外 TLS 反向代理 |
+
+### 三、部署步驟
+
+#### 步驟 1:Telegram Bot API server
+```yaml
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: always
+    ports: ["8086:8081"]
+    volumes: ["/var/lib/telegram-bot-api:/var/lib/telegram-bot-api"]
+    environment:
+      - TELEGRAM_API_ID=<你的 api_id>
+      - TELEGRAM_API_HASH=<你的 api_hash>      # 由 https://my.telegram.org 取得
+      - TELEGRAM_LOCAL=1                        # 啟用 --local(支援 >20MB 上傳)
+```
+> ⚠️ `aiogram/telegram-bot-api` 映像**忽略 CLI 參數**(entrypoint 只讀環境變數),設定一律用 env。
+
+#### 步驟 2:nginx 檔案服務層 `tg-files`(**關鍵,沒有它下載必 404**)
+
+`/opt/tg-files/docker-compose.yml`:
+```yaml
+services:
+  tg-files:
+    image: nginx:1.27-alpine
+    container_name: tg-files
+    restart: always
+    volumes:
+      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api:ro   # 與 bot API server 共用同一 volume
+      - /opt/tg-files/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports: ["0.0.0.0:8087:80"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+```
+
+`/opt/tg-files/default.conf`(改自 aiogram 官方範例):
+```nginx
+upstream telegram-bot-api { server host.docker.internal:8086; }
+
+server {
+    listen 80;
+    chunked_transfer_encoding on;
+    client_max_body_size 2G;
+    client_body_buffer_size 30M;
+    proxy_connect_timeout 600; proxy_send_timeout 600; proxy_read_timeout 600; send_timeout 600;
+    keepalive_timeout 0;
+
+    # 全路徑:/file/bot<token>/var/lib/telegram-bot-api/<token>/documents/x.jpg
+    location ~* ^/file/bot[^/]+/var/lib/telegram-bot-api(.*) {
+        rewrite ^/file/bot[^/]+/var/lib/telegram-bot-api(.*) /$1 break;
+        try_files $uri @files;
+    }
+    # 相對路徑:/file/bot<token>/<token>/documents/x.jpg
+    location ~* /file/bot[0-9]+:(.*) {
+        rewrite ^/file/bot(.*) /$1 break;
+        try_files $uri @files;
+    }
+    location / { try_files $uri @api; }
+    location @files { root /var/lib/telegram-bot-api; }
+    location @api {
+        proxy_pass http://telegram-bot-api;
+        proxy_redirect off;
+        proxy_set_header Host $host;
+    }
+}
+```
+驗證(用 `getFile` 回傳的 `file_path`):
+```bash
+curl -s -o /dev/null -w "%{http_code} %{size_download}\n" \
+  "http://127.0.0.1:8087/file/bot<token>/<file_path>"
+# 應回 200 + 檔案大小;若 404 就是少了這個 nginx
+```
+
+#### 步驟 3:CloudPaste backend + frontend
+`/opt/cloudpaste/docker-compose.yml`:
+```yaml
+services:
+  cloudpaste-backend:
+    image: dragon730/cloudpaste-backend:latest
+    container_name: cloudpaste-backend
+    restart: always
+    environment:
+      - NODE_ENV=production
+      - PORT=8787
+      - DATA_DIR=/data
+      - ENCRYPTION_SECRET=<與原部署一致的金鑰>   # 搬遷時必須一致,否則舊的加密設定解不開
+      - TASK_WORKER_POOL_SIZE=2
+    volumes: ["/opt/cloudpaste/data:/data"]
+    ports: ["127.0.0.1:8787:8787"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+  cloudpaste-frontend:
+    image: dragon730/cloudpaste-frontend:latest
+    container_name: cloudpaste-frontend
+    restart: always
+    environment: ["BACKEND_URL=https://<你的網域>"]
+    ports: ["127.0.0.1:8788:80"]
+    depends_on: [cloudpaste-backend]
+```
+
+#### 步驟 4:openresty 反向代理 + TLS
+- DNS:新增一筆 **A 記錄(灰雲 / DNS-only)** `<子網域>` → VPS 公網 IP。
+- 憑證:`acme.sh --issue -d <你的網域> --webroot <openresty webroot>`(HTTP-01),裝到 openresty 可讀路徑並設自動續期。
+- vhost(重點):
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name <你的網域>;
+    ssl_certificate     /www/ssl/<你的網域>/fullchain.pem;
+    ssl_certificate_key /www/ssl/<你的網域>/privkey.pem;
+
+    client_max_body_size 0;          # 不限制上傳大小
+    client_body_timeout 3600s;
+    send_timeout 3600s;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # 修正 mixed-content:後端用 new URL(c.req.url).origin 產生 http:// 連結
+        # (它不讀 X-Forwarded-Proto),https 頁面下載 http 資源會被瀏覽器封鎖。
+        proxy_set_header Accept-Encoding "";
+        sub_filter 'http://<你的網域>' 'https://<你的網域>';
+        sub_filter 'http%3A%2F%2F<你的網域>' 'https%3A%2F%2F<你的網域>';
+        sub_filter_once off;
+        sub_filter_types application/json;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:8788;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### 步驟 5:CloudPaste 後台設定(儲存設定 `telegram1`)
+| 欄位 | 值 | 原因 |
+|---|---|---|
+| Bot API 模式 | **自建 Bot API Server(self_hosted)** | 不勾選時直傳上限 20MB |
+| Bot API 地址(`endpoint_url`) | `http://host.docker.internal:8087` | **要指向 nginx**(它才能服務檔案下載) |
+| 分片大小(`part_size_mb`) | **5**(上傳速度慢時) | 分片過大 × 慢速上傳 → 逾時 |
+| 代理 URL(`url_proxy`) | 留空 | 掛載開 Web 代理即可 |
+| 掛載「啟用 Web 代理」 | 開 | 預覽 / 下載走 `/api/s`、`/api/p` |
+| 系統設定「默认使用代理」 | 開 | 新分享預設走代理 → 可預覽 |
+
+#### 步驟 6:大檔上傳
+**分享頁是「單次整檔」**:> ~250MB(視上傳速度)會撞 Node 300s 逾時。**大檔請改用「掛載瀏覽 → 分片模式」**(每片 5MB),逐片經 backend → nginx → bot API server → Telegram。
+
+### 四、踩雷與修正總表(重點!)
+
+| # | 症狀 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | **下載 / 預覽一直 404** | tdlib `--local` Bot API server **不服務檔案**,`/file/...` 永遠 404 | 加 **nginx sidecar(`tg-files`)** 從 volume 服務 `/file/`,並把 `endpoint_url` 指到它 |
+| 2 | 分享頁大檔上傳卡死、100% 不動 | Cloudflare 單一請求 **100MB** 上限 + Worker **128MB** 記憶體(後端把整檔讀進記憶體) | **搬離 Cloudflare**(Docker + DNS-only 直連 VPS) |
+| 3 | 分享頁上傳 >300s 後 500 `ECONNRESET` | 後端 `@hono/node-server`,Node 預設 **`requestTimeout=300s`** | 大檔改用**分片**(掛載分片模式) |
+| 4 | 分片(50–100MB)上傳卡住 | 分片過大 × 上傳慢 → 撞逾時 | 分片調成 **5MB** |
+| 5 | **按「下載文件」沒反應** | 後端產生 `http://` 的 `downloadUrl`;https 頁面下載 http 資源被瀏覽器**封鎖(mixed content / insecure download)** | openresty **`sub_filter`** 把 JSON 裡的 `http://<網域>` 改寫成 `https://` |
+| 6 | `wrangler d1 export` 失敗 | D1 有 **FTS5 虛擬表**,官方 export 不支援 | **逐表匯出**(`--table <表> --no-schema`),Linux 端用 `cat` 合併(**勿用 PowerShell 字串處理**,非 UTF-8 會被 grep 當 binary 吃掉資料) |
+
+### 五、資料搬遷(D1 → Docker SQLite)要點
+1. 匯出 D1:`npx wrangler d1 export <db> --table <每張表> --remote --no-schema`(逐表,避開 FTS5 虛擬表)。
+2. VPS 端 `cat` 合併各表 SQL(切勿經 PowerShell `Get-Content/Add-Content`)。
+3. 停 backend → 用 `sqlite3` 匯入(先 `DELETE FROM` 各表再 INSERT,避免與 Docker 預設值衝突)→ 起 backend。
+4. **`ENCRYPTION_SECRET` 必須與原部署完全一致**,否則已加密的 storage 設定(bot token 等)解不開。
+5. FTS 搜尋索引無法匯出 → 由後端排程 `scheduled_fs_index_rebuild` 自動重建。
+
+### 六、驗證清單
+- [ ] `curl -k https://<你的網域>/` → 200(前端)
+- [ ] `curl https://<你的網域>/api/share/get/<slug>` → 200,且 `downloadUrl` 是 **https://**
+- [ ] 小檔上傳(分享頁)→ OK
+- [ ] 大檔上傳(掛載 → 分片模式)→ OK
+- [ ] 分享頁「預覽」「下載文件」→ 正常
+- [ ] 掛載瀏覽預覽 → 正常
+
+---
 
 ## 📸 Showcase
 
