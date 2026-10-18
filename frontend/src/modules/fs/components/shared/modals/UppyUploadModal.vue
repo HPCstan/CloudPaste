@@ -417,10 +417,15 @@ const canStartUpload = computed(() => {
 });
 
 /**
- * 是否可「上傳資料夾」：僅分片模式支援（保留目錄結構）
+ * 是否可「上傳資料夾」：分片 / 流式 / 表單 皆可（預簽名不支援）。
+ * - 流式/表單是「單次請求」→ 適合中小檔；大檔仍建議分片
  */
 const canUseFolderUpload = computed(() => {
-  return uploadMethod.value === "multipart" && canUseMultipart.value === true && !isUploading.value;
+  if (isUploading.value) return false;
+  if (uploadMethod.value === "multipart") return canUseMultipart.value === true;
+  if (uploadMethod.value === "stream") return canUseStream.value === true;
+  if (uploadMethod.value === "form") return canUseForm.value === true;
+  return false;
 });
 
 const openFolderPicker = () => {
@@ -447,12 +452,17 @@ const onFolderSelected = (event) => {
     const rel = String(f.webkitRelativePath || "");
     const parts = rel.split("/").filter(Boolean);
     const relDir = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+    // 目標路徑（給流式/表單模式用 meta.path；分片模式則由 cloudpasteRelativeDir 解析）
+    const base = String(props.currentPath || "").replace(/\/+$/, "");
+    const targetPath = relDir
+      ? `${base}/${relDir}`.replace(/\/{2,}/g, "/")
+      : props.currentPath || "/";
     try {
       uppy.addFile({
         name: f.name,
         type: f.type || "application/octet-stream",
         data: f,
-        meta: { cloudpasteRelativeDir: relDir },
+        meta: { cloudpasteRelativeDir: relDir, path: targetPath },
       });
       added += 1;
     } catch (err) {

@@ -259,7 +259,7 @@ server {
 | `frontend/src/i18n/locales/zh-CN/mount.js`、`en-US/mount.js` | 新增 `uploadFolder` / `uploadFolderHint` / `folderAddFailed` |
 
 **運作方式**
-- **只在「分片模式(multipart)」提供**「上傳資料夾」按鈕。
+- **分片 / 流式 / 表單** 三種模式皆提供「上傳資料夾」按鈕(預簽名不支援)。流式/表單為**單次請求**,較適合中小檔;大檔仍建議分片(multipart)。
 - 保留**最上層資料夾名稱**:例在 `/telegram1/x` 選 `myfolder`(含 `a.txt`、`sub/b.txt`)→ 存成 `/telegram1/x/myfolder/a.txt`、`/telegram1/x/myfolder/sub/b.txt`。
 - **後端免改**:`/api/fs/multipart/init` 的 `path` 帶子目錄時,`completeFrontendMultipartUpload` 會用 `vfsRepo.ensureDirectoryPath()` 自動建立巢狀 VFS 目錄(後端原本就支援)。
 - 非資料夾上傳:`cloudpasteRelativeDir` 為空 → 路徑等同原行為,**不影響既有上傳**。
@@ -295,7 +295,7 @@ docker build -t cloudpaste-frontend:custom .
 > ⚠️ **務必把 `entrypoint.sh` / `nginx.conf` 轉成 LF 換行**:若從 Windows 複製(CRLF),容器會 `exit 127`(exec: not found)。修正:`sed -i 's/\r$//' entrypoint.sh nginx.conf`
 
 **限制**
-- 僅**分片模式**支援「上傳資料夾」。
+- 「上傳資料夾」支援**分片 / 流式 / 表單**(不支援預簽名)。流式/表單為單次請求,單檔仍受後端 Node 300s 限制。
 - 不同子夾的**同名同尺寸**檔案,可能被 Uppy 視為重複而略過(會提示 `folderAddFailed`)。
 - 單檔仍受 **2GB / 後端 Node 300s** 限制。
 

@@ -419,7 +419,7 @@ export default {
       multipartUpload: "Multipart Upload",
       resumeSupport: "Resume Support",
       uploadFolder: "Upload Folder",
-      uploadFolderHint: "Select a whole folder (with subfolders); directory structure is preserved (multipart mode)",
+      uploadFolderHint: "Select a whole folder (with subfolders); directory structure is preserved. Stream/form are single-request; use multipart mode for large files.",
       folderAddFailed: "Some files were skipped: {added} added, {failed} failed (possible duplicate name/size)",
       presignedMode: "Presigned Mode",
       streamMode: "Streaming Mode",

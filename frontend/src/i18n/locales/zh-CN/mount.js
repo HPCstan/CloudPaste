@@ -418,7 +418,7 @@ export default {
       multipartUpload: "分片上传",
       resumeSupport: "断点续传",
       uploadFolder: "上传文件夹",
-      uploadFolderHint: "选择整个文件夹（含子目录），自动保留目录结构（分片模式）",
+      uploadFolderHint: "选择整个文件夹（含子目录），自动保留目录结构；流式/表单为单次请求，大文件请用分片模式",
       folderAddFailed: "部分文件未加入：成功 {added}，失败 {failed}（可能同名同尺寸重复）",
       presignedMode: "预签名模式",
       streamMode: "流式模式",
