@@ -1537,6 +1537,14 @@ CloudPaste/
 └── README.md                         # Main project README
 ```
 
+> **⚠️ 本 fork 的差異(資料夾上傳)**:此 fork 在「掛載瀏覽 → 分片模式」新增「**上傳資料夾(保留目錄結構)**」功能,涉及的檔案:
+> - `frontend/src/modules/storage-core/uppy/StorageAdapter.js`(新增 `_resolveTargetPath`)
+> - `frontend/src/modules/storage-core/uppy/storage-adapter/multipartCreate.js`
+> - `frontend/src/modules/fs/components/shared/modals/UppyUploadModal.vue`(上傳資料夾按鈕)
+> - `frontend/src/i18n/locales/{zh-CN,en-US}/mount.js`
+>
+> 完整說明、重建映像步驟與限制,見上方「**七、額外功能:資料夾上傳(保留目錄結構)**」。
+
 ### Custom Docker Build
 
 If you want to customize Docker images or debug during development, you can follow these steps to build manually:
