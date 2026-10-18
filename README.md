@@ -245,6 +245,60 @@ server {
 - [ ] 分享頁「預覽」「下載文件」→ 正常
 - [ ] 掛載瀏覽預覽 → 正常
 
+### 七、額外功能:資料夾上傳(保留目錄結構)
+
+**背景**:CloudPaste 原版網頁上傳「只取檔名、不保留相對路徑」—— 用資料夾上傳時,所有檔案會被**攤平**在同一層。此 fork **已修正**。
+
+**改動(僅前端)**:
+
+| 檔案 | 改動 |
+|---|---|
+| `frontend/src/modules/storage-core/uppy/StorageAdapter.js` | 新增 `_resolveTargetPath(file)`:依 `file.meta.cloudpasteRelativeDir` 計算每檔案目標路徑 `<currentPath>/<相對目錄>`;並在**分片預初始化(init)**、**預簽名**、**multipartCreate** 三處統一使用 |
+| `frontend/src/modules/storage-core/uppy/storage-adapter/multipartCreate.js` | session 的 `path` / `key` 改用 `this._resolveTargetPath(file)` |
+| `frontend/src/modules/fs/components/shared/modals/UppyUploadModal.vue` | 新增「**上傳資料夾**」按鈕 + 隱藏 `<input webkitdirectory multiple>`;選資料夾後逐檔加入 Uppy 並設 `meta.cloudpasteRelativeDir`(取自 `file.webkitRelativePath` 的目錄部分) |
+| `frontend/src/i18n/locales/zh-CN/mount.js`、`en-US/mount.js` | 新增 `uploadFolder` / `uploadFolderHint` / `folderAddFailed` |
+
+**運作方式**
+- **只在「分片模式(multipart)」提供**「上傳資料夾」按鈕。
+- 保留**最上層資料夾名稱**:例在 `/telegram1/x` 選 `myfolder`(含 `a.txt`、`sub/b.txt`)→ 存成 `/telegram1/x/myfolder/a.txt`、`/telegram1/x/myfolder/sub/b.txt`。
+- **後端免改**:`/api/fs/multipart/init` 的 `path` 帶子目錄時,`completeFrontendMultipartUpload` 會用 `vfsRepo.ensureDirectoryPath()` 自動建立巢狀 VFS 目錄(後端原本就支援)。
+- 非資料夾上傳:`cloudpasteRelativeDir` 為空 → 路徑等同原行為,**不影響既有上傳**。
+
+**重建前端映像**(改完前端後)
+
+```bash
+# 1) 建置
+cd frontend
+npm ci        # 或 npm install
+npm run build # 產出 frontend/dist/
+
+# 2) 用 dist 打包前端映像
+mkdir -p /opt/cp-frontend-build && cd /opt/cp-frontend-build
+tar -xzf dist.tgz          # 內含 dist/
+cp <repo>/docker/frontend/entrypoint.sh .
+cp <repo>/docker/frontend/nginx.conf .
+cat > Dockerfile <<'EOF'
+FROM nginx:1.27-alpine
+COPY dist /usr/share/nginx/html
+COPY entrypoint.sh /entrypoint.sh
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+RUN chmod +x /entrypoint.sh
+EXPOSE 80
+CMD ["/entrypoint.sh"]
+EOF
+docker build -t cloudpaste-frontend:custom .
+
+# 3) 把 compose 的 frontend 映像換成 cloudpaste-frontend:custom,再 recreate:
+#    docker compose up -d --no-deps --force-recreate cloudpaste-frontend
+```
+
+> ⚠️ **務必把 `entrypoint.sh` / `nginx.conf` 轉成 LF 換行**:若從 Windows 複製(CRLF),容器會 `exit 127`(exec: not found)。修正:`sed -i 's/\r$//' entrypoint.sh nginx.conf`
+
+**限制**
+- 僅**分片模式**支援「上傳資料夾」。
+- 不同子夾的**同名同尺寸**檔案,可能被 Uppy 視為重複而略過(會提示 `folderAddFailed`)。
+- 單檔仍受 **2GB / 後端 Node 300s** 限制。
+
 ---
 
 ## 📸 Showcase

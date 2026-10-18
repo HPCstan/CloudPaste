@@ -15,7 +15,9 @@ const log = createLogger("MultipartCreate");
  */
 export async function createMultipartUpload(file) {
   try {
-    log.debug(`创建分片上传: ${file.name}`);
+    // 目標路徑：資料夾上傳時 = <currentPath>/<相對目錄>（由 StorageAdapter._resolveTargetPath 解析）
+    const targetPath = this._resolveTargetPath(file);
+    log.debug(`创建分片上传: ${file.name} -> ${targetPath}`);
 
     // 检查是否为ServerResume标记的可恢复上传
     if (file.meta.resumable && file.meta.existingUpload && file.meta.serverResume) {
@@ -205,7 +207,7 @@ export async function createMultipartUpload(file) {
             presignedUrls: refreshResponse?.data?.presignedUrls || [],
             policy: refreshResponse?.data?.policy || basePolicy || null,
             partsLedger,
-            path: this.currentPath,
+            path: targetPath,
             fileName: file.name,
             fileSize: file.size,
             partSize: effectivePartSize,
@@ -282,7 +284,7 @@ export async function createMultipartUpload(file) {
               uploadUrl,
               nextExpectedRanges,
             },
-            path: this.currentPath,
+            path: targetPath,
             fileName: file.name,
             fileSize: file.size,
             partSize: effectivePartSize,
@@ -333,7 +335,7 @@ export async function createMultipartUpload(file) {
     const response = preinit
       ? { success: true, data: preinit }
       : await fsApi.initMultipartUpload(
-          this.currentPath,
+          targetPath,
           file.name,
           file.size,
           file.type,
@@ -351,7 +353,7 @@ export async function createMultipartUpload(file) {
     const initPartSize = Number(init.partSize || init.part_size || 0);
     // 统一：key 存“无前导 /”的 storageKey 格式（用于缓存与续传标识）
     const key = String(
-      init?.key || `${this.currentPath}/${file.name}`.replace(/\/+/g, "/").replace(/^\/+/, ""),
+      init?.key || `${targetPath}/${file.name}`.replace(/\/+/g, "/").replace(/^\/+/, ""),
     ).replace(/^\/+/, "");
 
     if (!uploadId) {
@@ -388,7 +390,7 @@ export async function createMultipartUpload(file) {
         presignedUrls,
         policy,
         partsLedger,
-        path: this.currentPath,
+        path: targetPath,
         fileName: file.name,
         fileSize: file.size,
         partSize: init.partSize || partSize,
@@ -428,7 +430,7 @@ export async function createMultipartUpload(file) {
         uploadId,
         key,
         session,
-        path: this.currentPath,
+        path: targetPath,
         fileName: file.name,
         fileSize: file.size,
         partSize: init.partSize || partSize,

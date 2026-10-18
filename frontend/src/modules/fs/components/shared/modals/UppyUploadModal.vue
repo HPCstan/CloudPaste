@@ -60,6 +60,19 @@
           </div>
 
           <div class="flex items-center space-x-2">
+            <!-- 上傳資料夾（分片模式；保留目錄結構） -->
+            <button
+              v-if="canUseFolderUpload"
+              type="button"
+              @click="openFolderPicker"
+              :disabled="isUploading"
+              class="px-4 py-2 text-sm font-medium rounded-md transition-colors flex items-center space-x-2 disabled:opacity-50"
+              :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-gray-100' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'"
+              :title="t('mount.uppy.uploadFolderHint')"
+            >
+              <IconFolder size="sm" aria-hidden="true" />
+              <span>{{ t("mount.uppy.uploadFolder") }}</span>
+            </button>
             <!-- 开始上传按钮 -->
             <button
               v-if="canStartUpload"
@@ -76,6 +89,16 @@
         </div>
       </div>
     </div>
+
+    <!-- 隱藏：資料夾選擇器（webkitdirectory，分片模式保留目錄結構） -->
+    <input
+      ref="folderInputRef"
+      type="file"
+      webkitdirectory
+      multiple
+      class="hidden"
+      @change="onFolderSelected"
+    />
 
     <!-- 多个上传选择对话框 -->
     <Teleport to="body">
@@ -181,6 +204,7 @@ useUppyPaste({
 
 // 响应式数据
 const uppyContainerRef = ref(null);
+const folderInputRef = ref(null);
 const uploadMethod = ref("presigned");
 const canUsePresigned = ref(true);
 const canUseMultipart = ref(true);
@@ -391,6 +415,54 @@ const canStartUpload = computed(() => {
   if (uploadMethod.value === "form") return canUseForm.value === true;
   return false;
 });
+
+/**
+ * 是否可「上傳資料夾」：僅分片模式支援（保留目錄結構）
+ */
+const canUseFolderUpload = computed(() => {
+  return uploadMethod.value === "multipart" && canUseMultipart.value === true && !isUploading.value;
+});
+
+const openFolderPicker = () => {
+  if (isUploading.value) return;
+  folderInputRef.value?.click?.();
+};
+
+/**
+ * 資料夾選擇完成：把「含子目錄」的檔案加入 Uppy，並用 meta.cloudpasteRelativeDir 保留相對目錄。
+ * - 保留最上層資料夾名稱（例：選 myfolder → <currentPath>/myfolder/...）
+ * - StorageAdapter._resolveTargetPath 會依此把每個檔案送到正確的巢狀路徑
+ */
+const onFolderSelected = (event) => {
+  const input = event?.target;
+  const uppy = uppyInstance.value;
+  const files = input?.files ? Array.from(input.files) : [];
+  if (!uppy || !files.length) {
+    if (input) input.value = "";
+    return;
+  }
+  let added = 0;
+  let failed = 0;
+  for (const f of files) {
+    const rel = String(f.webkitRelativePath || "");
+    const parts = rel.split("/").filter(Boolean);
+    const relDir = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+    try {
+      uppy.addFile({
+        name: f.name,
+        type: f.type || "application/octet-stream",
+        data: f,
+        meta: { cloudpasteRelativeDir: relDir },
+      });
+      added += 1;
+    } catch (err) {
+      failed += 1;
+    }
+  }
+  errorMessage.value = failed ? t("mount.uppy.folderAddFailed", { added, failed }) : "";
+  // 允許重新選同一個資料夾
+  if (input) input.value = "";
+};
 
 const enabledPluginsCount = computed(() => {
   return pluginManager ? pluginManager.getEnabledPluginsCount() : 0;

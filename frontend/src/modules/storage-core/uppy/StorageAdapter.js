@@ -88,6 +88,21 @@ export class StorageAdapter {
   }
 
   /**
+   * 依檔案計算「上傳目標路徑」。
+   * - 一般上傳：回傳 this.currentPath（與原本行為完全一致）
+   * - 資料夾上傳：file.meta.cloudpasteRelativeDir 帶相對目錄 → 回傳 <currentPath>/<相對目錄>
+   * 後端 /api/fs/multipart/init 的 path 即目標目錄，帶子目錄時會建立對應巢狀目錄。
+   */
+  _resolveTargetPath(file) {
+    const relDir = String(file?.meta?.cloudpasteRelativeDir || "")
+      .replace(/\\/g, "/")
+      .replace(/^\/+|\/+$/g, "");
+    if (!relDir) return this.currentPath;
+    const base = String(this.currentPath || "").replace(/\/+$/, "");
+    return `${base}/${relDir}`.replace(/\/{2,}/g, "/");
+  }
+
+  /**
    * 维护一个 Blob/File -> Uppy fileId 的 WeakMap
    * - 解决 AwsS3.getChunkSize(blob) 无法直接拿到 file.meta 的问题
    * - 这个映射挂在 uppyInstance 上，避免多个 StorageAdapter 重复绑定事件
@@ -263,7 +278,7 @@ export class StorageAdapter {
       let response;
       try {
         response = await fsApi.initMultipartUpload(
-          this.currentPath,
+          this._resolveTargetPath(file),
           file.name,
           file.size,
           file.type,
@@ -569,7 +584,7 @@ export class StorageAdapter {
       }
 
       const response = await fsApi.getPresignedUploadUrl(
-        this.currentPath,
+        this._resolveTargetPath(file),
         file.name,
         file.type,
         file.size,
